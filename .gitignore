@@ -1,0 +1,21 @@
+# Compiled binaries & build outputs
+AntigProxy.exe
+*.exe
+*.pdb
+dist/
+bin/
+obj/
+
+# Local user config & runtime files (contains local paths)
+antigproxy.config.json
+antigproxy.status.txt
+SHA256SUMS.txt
+
+# IDE & OS temporary files
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+.DS_Store

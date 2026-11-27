@@ -1,0 +1,118 @@
+name: Build & Release AntigProxy
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "可选：输入发布版本号（例如 v1.0.0），留空则仅编译构建不发布 Release"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version tag
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = ""
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+          } elseif (-not [string]::IsNullOrWhiteSpace("${{ inputs.release_tag }}")) {
+            $tag = "${{ inputs.release_tag }}".Trim()
+          }
+
+          $version = "1.0.0.0"
+          if ($tag -match "(\d+)\.(\d+)\.(\d+)") {
+            $version = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved tag='$tag', fileVersion='$version'"
+
+      - name: Build AntigProxy.exe
+        shell: pwsh
+        run: |
+          .\build.ps1 -Version "${{ steps.meta.outputs.version }}"
+          if (-not (Test-Path ".\AntigProxy.exe")) {
+            throw "Build succeeded but AntigProxy.exe not found!"
+          }
+          $hash = (Get-FileHash ".\AntigProxy.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  AntigProxy.exe" | Out-File -FilePath ".\SHA256SUMS.txt" -Encoding ascii
+          Get-Item ".\AntigProxy.exe" | Select-Object Name, Length
+          Get-Content ".\SHA256SUMS.txt"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntigProxy-windows
+          path: |
+            AntigProxy.exe
+            SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Create or update GitHub Release
+        if: steps.meta.outputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $sha = (Get-Content ".\SHA256SUMS.txt" -Raw).Trim()
+
+          # Ensure tag exists when triggered manually via workflow_dispatch
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            $existingTag = git tag -l $tag
+            if ([string]::IsNullOrEmpty($existingTag)) {
+              git tag $tag
+              git push origin $tag
+            }
+          }
+
+          $notes = @"
+          ## AntigProxy $tag
+
+          Windows 原生 **Antigravity 通用免 TUN 代理启动器**，支持 Clash / Mihomo / v2rayN / Swell / FlClash / Sing-box 等所有常见本地代理客户端。
+
+          ### 下载与使用
+          1. 直接下载下方的 ``AntigProxy.exe``（绿色单文件，无需安装运行库）。
+          2. 双击运行，自动识别本地代理端口后点击 **「免 TUN 启动 Antigravity」**。
+          3. 推荐点击 **「创建桌面快捷方式」** 或 **「写入终端 agy 命令」**，日常一键直启。
+
+          ### 校验信息 (SHA-256)
+          ``````text
+          $sha
+          ``````
+          "@
+
+          $notesFile = Join-Path $env:RUNNER_TEMP "release_notes.md"
+          Set-Content -Path $notesFile -Value $notes -Encoding utf8
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists, updating assets..."
+            gh release upload $tag ".\AntigProxy.exe" ".\SHA256SUMS.txt" --clobber
+            gh release edit $tag --notes-file $notesFile
+          } else {
+            Write-Host "Creating new Release $tag..."
+            gh release create $tag ".\AntigProxy.exe" ".\SHA256SUMS.txt" `
+              --title "AntigProxy $tag" `
+              --notes-file $notesFile
+          }
